@@ -72,8 +72,9 @@ compareTo=None, maxColumns = 6, ratio=True, grid=True,size=None,canvasName=None,
     if legend:
         leg = ROOT.TLegend()
         if normalize : leg.SetHeader("Normalized to integral")
-        if files > 10 : leg.SetNColumns(2)
-
+        MaxRunsPerLegColumn = 10
+        if files > 10:
+            leg.SetNColumns(math.ceil(files/MaxRunsPerLegColumn))
     for i in range(files):
         if i==0 or not addHistos :
             hist = getHistogram(fileList[i], histogram)
