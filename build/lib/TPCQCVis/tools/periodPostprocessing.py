@@ -171,8 +171,6 @@ def main(path, fileList, runList):
     
     #Get directories
     directories = [key.GetTitle() for key in rootDataFile[0].GetListOfKeys() if key.GetClassName() == "TDirectoryFile"]
-    #directories.pop()
-    print(directories)
 
     #Create output file
     outputFileName = f"{path}/periodOverview.root"
@@ -209,9 +207,7 @@ def main(path, fileList, runList):
     error = "meanError"
 
     for dirID, directory in enumerate(directories):
-        print(directory)
         objects = [key.GetName() for key in rootDataFile[0].Get(directory).GetListOfKeys() if "TH1" in key.GetClassName()]
-        print(objects)
         for objectName in objects:
             if "hdEdxTotMIP_" in objectName:
                 trending = "fit(gaus,Sq,N,40,60)"

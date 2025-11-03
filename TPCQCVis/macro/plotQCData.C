@@ -14,6 +14,13 @@
 #include "QualityControl/MonitorObject.h"
 #include "CommonUtils/StringUtils.h"
 #include "TTree.h"
+
+#include <random>
+#include "rapidjson/document.h"
+#include "CCDB/CcdbApi.h"
+#include "TPCBase/DeadChannelMapCreator.h"
+#include "TPCBase/Mapper.h"
+
 #endif
 
 /// This can read a file containing Clusters, PID and Tracks
@@ -280,6 +287,147 @@ void plotQCData(const std::string filename)
   }
 
 //-------------------------------------------------
+
+/// Dead Channel Map
+  int maxEntries = -1;
+  //int maxEntries = 5;
+  bool drawAll = false;
+
+  //std::cout<<(name)<<std::endl;
+  //std::cout<<(name[0])<<std::endl;
+  //auto run = name[0]; //(int)name[0];
+
+
+    int run = -999;
+      // Find last '/' in the string
+    size_t pos = name[0].find_last_of('/');
+    if (pos != std::string::npos && pos + 1 < name[0].size()) {
+        std::string lastPart = name[0].substr(pos + 1);
+        try {
+            run = std::stoi(lastPart);
+            std::cout << "Last integer: " << run << std::endl;
+        } catch (const std::invalid_argument&) {
+            std::cout << "No valid integer found at the end." << std::endl;
+        }
+    } else {
+        std::cout << "No '/' found in the string." << std::endl;
+    }
+  
+  
+  
+  TH1::AddDirectory(false);
+
+  o2::ccdb::CcdbApi api;
+  api.init("http://alice-ccdb.cern.ch");
+
+  const std::string path = fmt::format("TPC/Calib/IDC_PadStatusMap_A/runNumber={}", run);
+  std::cout << "Fetching dead channel maps from CCDB path: " << path << std::endl;
+
+  auto json = api.list(path.data(), false, "application/json");
+
+  rapidjson::Document doc;
+  doc.Parse(json.data());
+
+  if (!doc.IsObject() || !doc.HasMember("objects") || !doc["objects"].IsArray()) {
+    throw std::runtime_error(fmt::format("could not parse object list for {}", path));
+  }
+
+  auto entries = doc["objects"].GetArray();
+  LOGP(info, "Found {} entries for object {}", entries.Size(), path);
+
+  std::sort(entries.begin(), entries.end(), [](const auto& a, const auto& b) { return a["validFrom"].GetInt64() < b["validFrom"].GetInt64(); });
+
+  o2::tpc::DeadChannelMapCreator deadChannelMapCreator;
+  deadChannelMapCreator.init(api.getURL());
+
+  TObjArray arrCanvases;
+
+  auto cDeadChannels = new TCanvas(fmt::format("cDeadChannels_run{}", run).data(), fmt::format("Dead Channels per Stack run {}", run).data(), 1200, 800);
+  arrCanvases.Add(cDeadChannels);
+
+  const int nSample = 20;
+  const int nEntries = maxEntries > 0 ? std::min(maxEntries, static_cast<int>(entries.Size())) : entries.Size();
+  //auto hDeadChannelsPerStack = new TH2F("hDeadChannelsPerSector", "Dead Channels per Stack;Entry;Stack (0-35: IROC, 36-71 OROC1, ...);#Dead Channels", nEntries, 0, nEntries, 144, 0, 144);
+  auto hDeadChannelsPerStack = new TH2F("hDeadChannelsPerSector", "Dead Channels per Stack;Entry;Stack (0-35: IROC, 36-71 OROC1, ...);#Dead Channels", nSample, 0, nSample, 144, 0, 144);
+
+  int ientry = 0;
+  // Deterministically sample 20 random entries from 'entries'
+  std::vector<size_t> sampled_indices;
+  std::mt19937 rng(42); // fixed seed for determinism
+  std::vector<size_t> all_indices(entries.Size());
+  std::iota(all_indices.begin(), all_indices.end(), 0);
+  if (entries.Size() > nSample) {
+    std::shuffle(all_indices.begin(), all_indices.end(), rng);
+    sampled_indices.assign(all_indices.begin(), all_indices.begin() + nSample);
+    std::sort(sampled_indices.begin(), sampled_indices.end());
+  } else {
+    for (size_t i = 0; i < entries.Size(); ++i) sampled_indices.push_back(i);
+  }
+
+  for (size_t sampled_idx : sampled_indices) {
+
+
+    const auto& entry = entries[sampled_idx];
+    if (maxEntries > 0 && ientry >= maxEntries) {
+      LOGP(info, "Reached max entries limit: {}, stopping processing", maxEntries);
+      break;
+    }
+    const auto startValidity = entry["validFrom"].GetInt64();
+    const auto endValidity = entry["validUntil"].GetInt64();
+    const auto timeStamp = (startValidity + endValidity) / 2;
+    // std::string etag;
+    // if (entry.FindMember("id") != entry.MemberEnd()) {
+    //   etag = entry["id"].GetString();
+    // }
+
+    if (ientry % 100 == 0) {
+      LOGP(info, "Processing entry {}/{} for run {}: {} - {}", ientry, entries.Size(), run, startValidity, endValidity);
+    }
+
+    deadChannelMapCreator.load(timeStamp);
+    auto& map = deadChannelMapCreator.getDeadChannelMap();
+
+    const std::vector<int> pads{o2::tpc::Mapper::getPadsInOROC1(), o2::tpc::Mapper::getPadsInOROC2(), o2::tpc::Mapper::getPadsInOROC3()};
+
+    for (size_t iRoc = 0; iRoc < map.getData().size(); ++iRoc) {
+      auto& roc = map.getCalArray(iRoc);
+      auto& data = roc.getData();
+      if (iRoc < 36) {
+        hDeadChannelsPerStack->Fill(ientry, iRoc, roc.getSum<float>() / static_cast<float>(o2::tpc::Mapper::getPadsInIROC()));
+      } else {
+        const auto sumO1 = std::accumulate(data.begin(), data.begin() + pads[0], 0.f) / static_cast<float>(pads[0]);
+        const auto sumO2 = std::accumulate(data.begin() + pads[0], data.begin() + pads[0] + pads[1], 0.f) / static_cast<float>(pads[1]);
+        const auto sumO3 = std::accumulate(data.begin() + pads[0] + pads[1], data.end(), 0.f) / static_cast<float>(pads[2]);
+        hDeadChannelsPerStack->Fill(ientry, iRoc, sumO1);
+        hDeadChannelsPerStack->Fill(ientry, iRoc + 36, sumO2);
+        hDeadChannelsPerStack->Fill(ientry, iRoc + 72, sumO3);
+      }
+    }
+
+    auto canvas = o2::tpc::painter::draw(map, 300, 0, 1);
+    canvas->SetName(fmt::format("DeadChannelMap_{}_{:03}_{}_{}", run, ientry, startValidity, endValidity).data());
+    canvas->SetTitle(fmt::format("Dead Channel Map for run {} ({}: {} - {})", run, ientry, startValidity, endValidity).data());
+    arrCanvases.Add(canvas);
+    ++ientry;
+  }
+
+  cDeadChannels->cd();
+  hDeadChannelsPerStack->SetStats(false);
+  hDeadChannelsPerStack->Draw("COLZ");
+  o2::tpc::painter::adjustPalette(hDeadChannelsPerStack, 0.92);
+
+  fout->cd();
+  gDirectory->mkdir("DeadChannelMapsTranding");
+  fout->cd("DeadChannelMapsTranding");
+  //arrCanvases.Write();
+  hDeadChannelsPerStack->Write("hDeadChannelMaps");
+  
+  //utils::saveCanvases(arrCanvases, "./", drawAll ? "png,png" : "", fmt::format("DeadChannelMap_run{}_norm.root", run).data());
+  //if (!drawAll) {
+  //  cDeadChannels->SaveAs(fmt::format("DeadChannelMap_run{}_norm.png", run).data());
+  //}
+
+
   fout->Close();
   return;
 }
