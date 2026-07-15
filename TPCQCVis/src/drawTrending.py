@@ -1,7 +1,6 @@
 import math
 from math import sqrt
 import re
-from socket import NI_NUMERICHOST
 import ROOT
 from TPCQCVis.src.utility import *
 

@@ -1,87 +1,132 @@
-import subprocess
+"""Orchestrate download / plot / report for one or more periods.
+
+This is the manual entry point (the scheduled one is ``dailyAsyncFromEmail``).
+For every requested period (and pass) it fans out to the stage scripts.
+
+Refactor notes (behaviour preserved):
+
+* The stage functions no longer read the global ``args`` object — the flags and
+  parameters they need are passed in explicitly, so the control flow is
+  testable and there are no hidden globals.
+* Sub-commands are launched through :func:`TPCQCVis.core.shell.run` as argv
+  lists (no ``shell=True``); the command *content* is identical to before, but
+  failures are now logged instead of silently ignored.
+* Environment variables come from the validated :data:`settings` object.
+"""
+
 import argparse
 import concurrent.futures
-import os
+import sys
 
-CODEDIR = os.environ['TPCQCVIS_DIR']
-DATADIR = os.environ['TPCQCVIS_DATA']
-REPORTDIR = os.environ['TPCQCVIS_REPORT']
+from TPCQCVis.core import settings, get_logger
+from TPCQCVis.core import paths as P
+from TPCQCVis.core.shell import run
+
+log = get_logger("tpcqcvis.qc_master")
+
+PY = sys.executable  # the interpreter running us (the alienv python), reused for children
+
 
 def download(path, period, apass):
-    download_command = f"python {CODEDIR}/TPCQCVis/tools/downloadFromAlien.py {path}/{period}/{apass}/ /alice/data/20{period[3:5]}/{period}/ {apass}"
-    print(f"Executing download command for {path}/{period}/{apass}/")
-    subprocess.run(download_command, shell=True)
+    remote = f"/alice/data/20{period[3:5]}/{period}/"
+    log.info("Download: %s/%s/%s/", path, period, apass)
+    run([PY, str(settings.tool("downloadFromAlien.py")),
+         f"{path}/{period}/{apass}/", remote, apass])
+
 
 def plot(path, period, apass, rerun):
-    if os.path.isdir(f"{path}/{period}/{apass}/"):
-        plotter_command = f"python {CODEDIR}/TPCQCVis/tools/runPlotter.py {path}/{period}/{apass}/"
-        if rerun:
-            plotter_command += " --rerun"
-        print(f"Executing plotter command for {path}/{period}/{apass}/")
-        subprocess.run(plotter_command, shell=True)
+    stage_dir = f"{path}/{period}/{apass}/"
+    if not P.Path(stage_dir).is_dir():
+        return
+    cmd = [PY, str(settings.tool("runPlotter.py")), stage_dir]
+    if rerun:
+        cmd.append("--rerun")
+    log.info("Plot: %s", stage_dir)
+    run(cmd)
+
 
 def generate_report(path, period, apass, num_threads):
-    if os.path.isdir(f"{path}/{period}/{apass}/"):
-        report_command = f"python {CODEDIR}/TPCQCVis/tools/generateReport.py {path} {period} {apass} -t {num_threads}"
-        print(f"Executing report command for {path}/{period}/{apass}/")
-        subprocess.run(report_command, shell=True)
+    stage_dir = f"{path}/{period}/{apass}/"
+    if not P.Path(stage_dir).is_dir():
+        return
+    log.info("Report: %s", stage_dir)
+    run([PY, str(settings.tool("generateReport.py")),
+         path, period, apass, "-t", str(num_threads)])
 
-def execute_commands(path, period_list, apass, num_threads, rerun):
-    # Try to execute for all folders in path if no period list is given
-    if not args.period_list :
-        period_list = [name for name in os.listdir(f"{path}") if os.path.isdir(path+"/"+name)]
-        if not period_list: raise Exception(f"Something went wrong when trying to find periods for {path}/")
-        print("[INFO] No period list provided. Running for",period_list)
 
-    # Download from alien
-    if args.download:
+def _passes_for(path, period, apass):
+    """Explicit apass if given, else every pass sub-directory of the period."""
+    if apass:
+        return [apass]
+    passes = P.subdirectories(f"{path}/{period}")
+    if not passes:
+        raise RuntimeError(f"No apass folders found under {path}/{period}/")
+    return passes
+
+
+def execute_commands(path, period_list, apass, num_threads, rerun,
+                     do_download, do_plot, do_report):
+    # Default to every period folder under `path` when none are listed.
+    if not period_list:
+        period_list = P.subdirectories(path)
+        if not period_list:
+            raise RuntimeError(f"No period folders found under {path}/")
+        log.info("No period list provided. Running for %s", period_list)
+
+    if do_download:
+        # Downloads stay sequential (single worker) due to LRZ rate limits.
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            futures = []
-            for period in period_list: futures.append(executor.submit(download, path, period, apass))
+            futures = [executor.submit(download, path, period, apass)
+                       for period in period_list]
             concurrent.futures.wait(futures)
 
-    # Create _QC.root with plotted TPC histograms
-    if args.plot:
+    if do_plot:
         with concurrent.futures.ThreadPoolExecutor(max_workers=num_threads) as executor:
             futures = []
             for period in period_list:
-                if not args.apass:
-                    apassList = [name for name in os.listdir(f"{path}/{period}/") if os.path.isdir(path+"/"+period+"/"+name)]
-                    if not apassList: raise Exception(f"Something went wrong when trying to find apass for {path}/{period}/")
-                    for apass in apassList:
-                        futures.append(executor.submit(plot, path, period, apass, rerun))
-                else:
-                    futures.append(executor.submit(plot, path, period, apass, rerun))
+                for ap in _passes_for(path, period, apass):
+                    futures.append(executor.submit(plot, path, period, ap, rerun))
             concurrent.futures.wait(futures)
 
-    # Create async reports  
-    if args.report:
-        if args.path:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=num_threads) as executor:
-                futures = []
-                parallelThreads = max(1, num_threads//len(period_list)) # Otherwise they try to get too many threads
-                for period in period_list:
-                    if not args.apass:
-                        apassList = [name for name in os.listdir(f"{path}/{period}/") if os.path.isdir(path+"/"+period+"/"+name)]
-                        if not apassList: raise Exception(f"Something went wrong when trying to find apass for {path}/{period}/")
-                        for apass in apassList:
-                            futures.append(executor.submit(generate_report, path, period, apass, parallelThreads))
-                    else:
-                        futures.append(executor.submit(generate_report, path, period, apass, parallelThreads))
-                concurrent.futures.wait(futures)
-        else:
-            print("Error: Missing path and/or apass arguments for report command")
+    if do_report:
+        if not path:
+            log.error("Missing path argument for report command")
+            return
+        with concurrent.futures.ThreadPoolExecutor(max_workers=num_threads) as executor:
+            # Split the thread budget across periods so children don't oversubscribe.
+            parallel_threads = max(1, num_threads // len(period_list))
+            futures = []
+            for period in period_list:
+                for ap in _passes_for(path, period, apass):
+                    futures.append(executor.submit(
+                        generate_report, path, period, ap, parallel_threads))
+            concurrent.futures.wait(futures)
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Script for executing commands for each period")
+
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(description="Execute pipeline stages for each period")
     parser.add_argument("period_list", nargs="*", help="List of period strings")
     parser.add_argument("-d", "--download", action="store_true", help="Run download command")
     parser.add_argument("-p", "--plot", action="store_true", help="Run plotter command")
     parser.add_argument("-r", "--report", action="store_true", help="Run report command")
-    parser.add_argument("-rr", "--rerun", action="store_true", help="Rerun plotter for existing periods")
+    parser.add_argument("-rr", "--rerun", action="store_true",
+                        help="Rerun plotter for existing periods")
     parser.add_argument("--path", help="Path string for generateReport command")
     parser.add_argument("--apass", help="Apass string for generateReport command")
-    parser.add_argument("-t", "--num_threads", type=int, default=1, help="Number of threads to be used (default: 1)")
-    args = parser.parse_args()
-    print(args.path)
-    execute_commands(args.path, args.period_list, args.apass, args.num_threads, args.rerun)
+    parser.add_argument("-t", "--num_threads", type=int, default=1,
+                        help="Number of threads to be used (default: 1)")
+    return parser.parse_args(argv)
+
+
+def main(argv=None):
+    args = parse_args(argv)
+    log.info("Path: %s", args.path)
+    execute_commands(
+        path=args.path, period_list=args.period_list, apass=args.apass,
+        num_threads=args.num_threads, rerun=args.rerun,
+        do_download=args.download, do_plot=args.plot, do_report=args.report,
+    )
+
+
+if __name__ == "__main__":
+    main()

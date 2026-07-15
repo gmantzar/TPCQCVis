@@ -6,11 +6,14 @@ from array import array
 import argparse
 import concurrent.futures
 import TPCQCVis.tools.periodPostprocessing as periodPostprocessing
+from TPCQCVis.core import settings, get_logger
 
-# Get the environment variables
-CODEDIR = os.environ['TPCQCVIS_DIR']
-DATADIR = os.environ['TPCQCVIS_DATA']
-REPORTDIR = os.environ['TPCQCVIS_REPORT']
+log = get_logger("tpcqcvis.runPlotter")
+
+# Get the environment variables (validated, with clear errors when unset)
+CODEDIR = str(settings.code_dir)
+DATADIR = str(settings.data_dir)
+REPORTDIR = str(settings.report_dir)
 
 # Load the ROOT macro for plotting
 ROOT.gROOT.LoadMacro(f"{CODEDIR}/TPCQCVis/macro/plotQCData.C+")
@@ -44,8 +47,11 @@ def plot(path):
     addMovingWindow(path)
 
 def plot_run_param(local_dir, path, excludedPoints):
-    plotter_command = f"python {CODEDIR}/TPCQCVis/tools/runPlotter.py {local_dir} --target {path} --add_run_param --excludedPoints {excludedPoints}"
-    subprocess.run(plotter_command, shell=True)
+    from TPCQCVis.core.shell import run as shrun
+    import sys
+    shrun([sys.executable, f"{CODEDIR}/TPCQCVis/tools/runPlotter.py",
+           local_dir, "--target", path, "--add_run_param",
+           "--excludedPoints", str(excludedPoints)])
 
 def run_param_func(local_dir, run, excludedPoints):
     print("Excluded points: ", excludedPoints)
@@ -105,7 +111,6 @@ def main(local_dir, add_run_param, rerun, target, threads, period_postprocessing
         else:
             print("Target ", target, " doesn't exist!")
     else:
-        os.system("cd " + local_dir)    
         fileList = glob.glob(local_dir + "*.root")
         fileList = [file for file in fileList if ("periodOverview" not in file and "_QC" not in file)]
         runList = [file[file.rfind('/')+1:-5] for file in fileList]
@@ -178,7 +183,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--period_postprocessing",
         action="store_false",
-        help="Add run parameters (default: True)"
+        help="Disable period postprocessing (it runs by default; passing this flag turns it off)"
     )
     parser.add_argument(
         "--rerun",

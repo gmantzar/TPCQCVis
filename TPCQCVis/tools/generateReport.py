@@ -1,5 +1,4 @@
 import re
-import subprocess
 import json
 import glob
 import argparse
@@ -7,7 +6,17 @@ import tempfile
 import os
 import concurrent.futures
 
-CODEDIR = os.environ['TPCQCVIS_DIR']
+from TPCQCVis.core import settings, get_logger
+from TPCQCVis.core import paths as P
+from TPCQCVis.core.shell import run as shrun
+
+log = get_logger("tpcqcvis.generateReport")
+
+CODEDIR = str(settings.code_dir)
+# NOTE: DATADIR/REPORTDIR are read as the raw environment strings (not the
+# resolved, slash-normalised settings paths) on purpose: the "skip existing
+# reports" logic below relies on exact string-prefix slicing of these values,
+# so normalising the trailing slash here would change which reports are skipped.
 DATADIR = os.environ['TPCQCVIS_DATA']
 REPORTDIR = os.environ['TPCQCVIS_REPORT']
 
@@ -37,7 +46,7 @@ def createRunReport(runNumber, period, apass, path, template_path, dir, n_gaussi
     print(" → Creating run report:", period, apass, runNumber)
     replace_in_ipynb(template_path, temp_run_path,
         ["myPeriod", "myPass", "123456", "myPath", "numGaussians"],
-        [period, apass, runNumber, path, str(args.n_gaussians)]
+        [period, apass, runNumber, path, str(n_gaussians)]
     )
     # The command and its arguments for the run report
     run_report_command = [
@@ -45,14 +54,14 @@ def createRunReport(runNumber, period, apass, path, template_path, dir, n_gaussi
         "--output", dir + runNumber
     ]
     # Run the command for the run report
-    output = subprocess.run(run_report_command, capture_output=True)
+    output = shrun(run_report_command, capture=True, label=f"run report {runNumber}")
     # Check the return code of the command
     if output.returncode == 0:
         # If the command runs successfully
         print("  ↳ Async QC report generated successfully for runNumber", runNumber)
     else:
         # If the command fails
-        print("Error:", output.stderr.decode())
+        print("Error:", output.stderr)
     # Remove the temporary files
     if temp_run_path:
         os.remove(temp_run_path)
@@ -73,14 +82,14 @@ def createPeriodReport(period, apass, path, template_path, dir):
         "--output", dir + period + "_" + apass
     ]
     # Run the command for the period report
-    output = subprocess.run(period_report_command, capture_output=True)
+    output = shrun(period_report_command, capture=True, label=f"period report {period} {apass}")
     # Check the return code of the command
     if output.returncode == 0:
         # If the command runs successfully
         print("  ↳ Period QC report generated successfully for ", period, apass)
     else:
         # If the command fails
-        print("Error:", output.stderr.decode())
+        print("Error:", output.stderr)
     if temp_period_path:
         os.remove(temp_period_path)
 
@@ -107,14 +116,14 @@ def createComparisonReport(period, apass, comparison_pass, path, template_path, 
     ]
 
     # Run the command for the comparison report
-    output = subprocess.run(comparison_report_command, capture_output=True)
+    output = shrun(comparison_report_command, capture=True, label=f"comparison report {period} {apass}")
     # Check the return code of the command
     if output.returncode == 0:
         # If the command runs successfully
         print("  ↳ Comparison QC report generated successfully for ", period, apass)
     else:
         # If the command fails
-        print("Error:", output.stderr.decode())
+        print("Error:", output.stderr)
     if temp_comparison_path:
         os.remove(temp_comparison_path)
 
@@ -137,10 +146,9 @@ if __name__ == "__main__":
 
     if not args.only_comparison:
         fullpath = args.path + "/" + args.period + "/" + args.apass + "/"
-        fileList = glob.glob(fullpath + "*_QC.root")
-        fileList = [file for file in fileList if file[-13] != "_"]
-        fileList.sort()
-        runList = [fileList[i][-14:-8] for i in range(len(fileList))]
+        # Sorted full-run numbers (excludes time-slice files and periodOverview);
+        # equivalent to the previous manual slicing but parsed in one tested place.
+        runList = P.list_runs(fullpath, processed=True)
         runList_selected = runList
         # Option not to rerun existing reports
         if not args.rerun:

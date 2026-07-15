@@ -128,16 +128,6 @@ def downloadFiles(local_dir, remote_dir, production, runList, dead_channel_maps=
 
                 # Write and close the ROOT file
                 root_file.Close()
-
-                if False:
-                    slices = subprocess.run(["alien.py", "find", remote_dir + run + "/" + production + "/", "/QC/001/QC.root"], capture_output=True)
-                    slices_path = slices.stdout[:-1].decode('UTF-8').splitlines()
-                    if len(slices_path) > 1:
-                        print("Downloading all time slices as well.")
-                        for path in slices_path:
-                            timestamp = path[-(len("/QC/001/QC.root")+4):-len("/QC/001/QC.root")]
-                            downloadAttempts(path, local_dir + run + "_" + timestamp +".root", 5)
-                            #subprocess.run(["alien.py", "cp", "alien:" + path, "file:" + local_dir + run + "_" + timestamp +".root"])
             else:
                 print("File " + remote_dir + run + "/" + production + "/QC/001/QC.root" + " not found!")
         time.sleep(1) #otherwise too many requests

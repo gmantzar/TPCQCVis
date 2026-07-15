@@ -142,7 +142,15 @@ def updateRanges(histograms):
         for hist in histograms:
             hist.SetMaximum(limMax)
             hist.SetMinimum(limMin)
-    return limMin,limMax
+        return limMin,limMax
+    # Degenerate case (0 or 1 histogram): nothing to harmonise across, so we
+    # leave the histogram's own range untouched and just report it. This avoids
+    # the UnboundLocalError the previous version raised when called with a
+    # single histogram; the multi-histogram path above is unchanged.
+    if not histograms:
+        return None, None
+    hist = histograms[0]
+    return hist.GetMinimum(), hist.GetMaximum()
         
 
 def getPIDProfiles(qcFile,charge="pos",debug=False, rebin=1):

@@ -36,13 +36,21 @@ if __name__ == "__main__":
     with tempfile.NamedTemporaryFile(prefix="TPCQC_", suffix=".ipynb", delete=False) as temp_run:
         temp_run_path = temp_run.name
 
+
+    path = f"{DATADIR}/sim/2025/"
+    period = "LHC25l1" 
+    passName = "0" #keep empty ("") if MC
+    pathComparison = f"{DATADIR}/2025/"
+    periodListComparison =  ["LHC25ac","LHC25ah","LHC25ai","LHC25am"]
+    passNameListComparison = ["apass1","apass1","apass1","apass1"]
+
     ### Part to set
-    path = f"{DATADIR}/sim/2024/"
-    period = "LHC24e2" 
-    passName = "" #keep empty ("") if MC
-    pathComparison = f"{DATADIR}/2023/"
-    periodListComparison =  ["LHC23zzf","LHC23zzg","LHC23zzh"]
-    passNameListComparison = ["apass3","apass3","apass3"]
+    #path = f"{DATADIR}/sim/2024/"
+    #period = "LHC24e2" 
+    #passName = "" #keep empty ("") if MC
+    #pathComparison = f"{DATADIR}/2023/"
+    #periodListComparison =  ["LHC23zzf","LHC23zzg","LHC23zzh"]
+    #passNameListComparison = ["apass3","apass3","apass3"]
     #passNameListComparison = ["" for period in periodListComparison] #keep empty ("") if MC
 
     # Loop over the comparison periods

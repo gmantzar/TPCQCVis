@@ -1,25 +1,31 @@
-import os.path
 import argparse
 import base64
+import concurrent.futures
+import datetime
+import itertools
+import json
+import os
+import subprocess
+import sys
 import time
+
+import requests
+import schedule
+from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
-import requests
-import datetime
-import os
-import subprocess
-import argparse
-import concurrent.futures
-import schedule
-import time
-import itertools
+
+from TPCQCVis.core import settings, get_logger
+from TPCQCVis.core.shell import run as shrun
+
+log = get_logger("tpcqcvis.dailyAsync")
 
 SCOPES = ['https://www.googleapis.com/auth/gmail.readonly','https://www.googleapis.com/auth/gmail.modify']
 
-CODEDIR = os.environ['TPCQCVIS_DIR']
-DATADIR = os.environ['TPCQCVIS_DATA']
-REPORTDIR = os.environ['TPCQCVIS_REPORT']
+CODEDIR = str(settings.code_dir)
+DATADIR = str(settings.data_dir)
+REPORTDIR = str(settings.report_dir)
 
 # Access GMAIL and read daily productions
 def readDailyReport(sender="",date="",onlyUnread=False):
@@ -34,19 +40,26 @@ def readDailyReport(sender="",date="",onlyUnread=False):
     creds = None
     # The file token.json stores the user's access and refresh tokens, and is
     # created automatically when the authorization flow completes for the first
-    # time.
-    if os.path.exists(CODEDIR+'token.json'):
-        creds = Credentials.from_authorized_user_file(CODEDIR+'token.json', SCOPES)
-    # If there are no (valid) credentials available, let the user log in.
+    # time. Use os.path.join so this works whether or not CODEDIR ends in a slash.
+    token_path = os.path.join(CODEDIR, 'token.json')
+    credentials_path = os.path.join(CODEDIR, 'credentials.json')
+    if os.path.exists(token_path):
+        creds = Credentials.from_authorized_user_file(token_path, SCOPES)
+    # If there are no (valid) credentials available, refresh or log in.
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
-            os.remove(CODEDIR+'token.json')
-            #creds.refresh(Request())    
+            # Non-interactive refresh — this is what allows the daily job to run
+            # headless under cron. (Previously the token was deleted and the
+            # refresh was commented out, which forced an impossible interactive
+            # login on every expiry and is why the automation stopped working.)
+            log.info("Refreshing expired Gmail credentials")
+            creds.refresh(Request())
         else:
-            flow = InstalledAppFlow.from_client_secrets_file(CODEDIR+'credentials.json', SCOPES)
+            log.info("No valid credentials; starting interactive authorisation")
+            flow = InstalledAppFlow.from_client_secrets_file(credentials_path, SCOPES)
             creds = flow.run_local_server(port=0)
         # Save the credentials for the next run
-        with open(CODEDIR+'token.json', 'w') as token:
+        with open(token_path, 'w') as token:
             token.write(creds.to_json())
     try:
         # Call the Gmail API
@@ -81,9 +94,11 @@ def readDailyReport(sender="",date="",onlyUnread=False):
                                         new_productions.append(line)
 
                                 # mark the message as read (optional)
-                                #msg  = service.users().messages().modify(userId='me', id=message['id'], body={'removeLabelIds': ['UNREAD']}).execute()                                                       
-                            except BaseException as error:
-                                pass
+                                #msg  = service.users().messages().modify(userId='me', id=message['id'], body={'removeLabelIds': ['UNREAD']}).execute()
+                            except Exception as error:
+                                # Log instead of silently swallowing: a change in
+                                # the email format used to disappear without trace.
+                                log.warning("Could not parse email part %s: %s", i, error)
                         break
     except Exception as error:
         print(f'An error occurred: {error}')
@@ -125,9 +140,9 @@ def downloadFromAlien(new_productions):
 
 def plotQCfiles(paths, num_threads):
     def plot(path):
-        plotter_command = f"python {CODEDIR}/TPCQCVis/tools/runPlotter.py {path} --target {path}"
         print(f"Executing plotter command for {path}")
-        subprocess.run(plotter_command, shell=True)
+        shrun([sys.executable, f"{CODEDIR}/TPCQCVis/tools/runPlotter.py",
+               path, "--target", path])
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=num_threads) as executor:
         futures = []
@@ -142,9 +157,9 @@ def plotQCfiles(paths, num_threads):
 
 def reportTPCAsyncQC(paths, num_threads):
     def generate_report(path, period, apass, num_threads):
-        report_command = f"python {CODEDIR}/TPCQCVis/tools/generateReport.py {path} {period} {apass} -t {num_threads}"
         print(f"Executing report command for {path}/{period}/{apass}/")
-        subprocess.run(report_command, shell=True)
+        shrun([sys.executable, f"{CODEDIR}/TPCQCVis/tools/generateReport.py",
+               path, period, apass, "-t", str(num_threads)])
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=num_threads) as executor:
         unique = list(set(["/"+os.path.join(*(path.split("/")[:-1]))+"/" for path in paths]))
@@ -195,10 +210,13 @@ def createMessage():
     return str(myText)
 
 def sendMessageToMattermost(myMessage):
-    headers = {'Content-Type': 'application/json',}
-    values = '{ "text": \"'+myMessage+'\" }'
+    headers = {'Content-Type': 'application/json'}
+    # Build the payload with json.dumps so quotes/newlines/backslashes in the
+    # report message are escaped correctly (the previous hand-built string broke
+    # on any of those). Webhook URL comes from configuration, not source.
+    values = json.dumps({"text": myMessage})
     print("Sending following message:\n"+myMessage)
-    response = requests.post("https://mattermost.web.cern.ch/hooks/krtdox9rbtgsxgqif3ijy51y8c",headers=headers, data=values)
+    response = requests.post(settings.mattermost_webhook, headers=headers, data=values)
     print(response)
 
 def catchUp(new_productions, threads):
@@ -215,7 +233,9 @@ def catchUp(new_productions, threads):
         apass = period_pass.split("/")[1]
         year = "20"+period.split("LHC")[1][:2]
         print(f"Processing {year}/{period}/{apass}")
-        subprocess.run(f"python {CODEDIR}/TPCQCVis/tools/qc_master.py -t {threads} --path {DATADIR}/{year} --apass {apass} --download --plot --report {period}", shell=True)
+        shrun([sys.executable, f"{CODEDIR}/TPCQCVis/tools/qc_master.py",
+               "-t", str(threads), "--path", f"{DATADIR}/{year}", "--apass", apass,
+               "--download", "--plot", "--report", period])
 
 def printDurations(durations):
     print("\n\n ### Durations:")
@@ -232,7 +252,7 @@ def main(date=None, threads=1, mattermost=False, no_plot=False, no_report=False,
     # Measure run duration for each step
     start = time.time()
     # Read Email
-    new_productions = readDailyReport("berkin.ulukutlu@cern.ch", date, onlyUnread=True)
+    new_productions = readDailyReport(settings.daily_report_sender, date, onlyUnread=True)
     if new_productions:
         # Download
         downloadedFiles = downloadFromAlien(new_productions)
@@ -255,18 +275,20 @@ def main(date=None, threads=1, mattermost=False, no_plot=False, no_report=False,
         # Make message from created reports
         mattermostMessage = createMessage()
         # Move reports
-        move_command = f"python {CODEDIR}/TPCQCVis/tools/moveFiles.py -i {DATADIR} -o {REPORTDIR} -p '*.html'"
-        subprocess.run(move_command, shell=True)
-        
+        shrun([sys.executable, f"{CODEDIR}/TPCQCVis/tools/moveFiles.py",
+               "-i", DATADIR, "-o", REPORTDIR, "-p", "*.html"])
+
         if no_upload:
             printDurations(durations)
             return
-        # rsync
-        sync_command = f"gpg -d -q ~/.myssh.gpg | sshpass rsync -hvrPt {REPORTDIR} lxplus:/eos/project-a/alice-tpc-qc/www/reports/"
-        subprocess.run(sync_command, shell=True)
+        # rsync (publishing targets and ssh secret come from configuration)
+        sync_command = (f"gpg -d -q {settings.ssh_secret} | sshpass rsync -hvrPt "
+                        f"{REPORTDIR} {settings.rsync_target}")
+        shrun(sync_command, shell=True)
         # Update server
-        update_command = "gpg -d -q ~/.myssh.gpg | sshpass ssh lxplus8 'python2 /eos/project-a/alice-tpc-qc/www_resources/updateServer.py'"
-        subprocess.run(update_command, shell=True)
+        update_command = (f"gpg -d -q {settings.ssh_secret} | sshpass ssh "
+                          f"{settings.update_server_host} '{settings.update_server_cmd}'")
+        shrun(update_command, shell=True)
         durations["Upload"] = time.time() - start - durations["Download"] - durations["Plot"] - durations["Report"]
         if mattermost:
             # Send mattermost message
@@ -315,7 +337,7 @@ if __name__ == "__main__":
         
         # Run catch up
         if args.catch_up:
-            all_productions = [readDailyReport("berkin.ulukutlu@cern.ch", date, onlyUnread=True) for date in dates]
+            all_productions = [readDailyReport(settings.daily_report_sender, date, onlyUnread=True) for date in dates]
             all_productions = list(itertools.chain.from_iterable(all_productions))
             catchUp(all_productions, threads)
         else: #Run normally
@@ -326,7 +348,7 @@ if __name__ == "__main__":
     else:
         # Run catch up
         if args.catch_up:
-            all_productions = readDailyReport("berkin.ulukutlu@cern.ch", date, onlyUnread=True)
+            all_productions = readDailyReport(settings.daily_report_sender, date, onlyUnread=True)
             catchUp(all_productions, threads)
         else: #Run normally
             main(date=date, threads=threads, mattermost=args.mattermost, no_plot=args.no_plot, no_report=args.no_report, no_upload=args.no_upload)

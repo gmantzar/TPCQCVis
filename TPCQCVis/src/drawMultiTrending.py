@@ -2,7 +2,6 @@ import math
 from statistics import mean
 from math import sqrt
 import re
-from socket import NI_NUMERICHOST
 import ROOT
 
 def drawMultiTrending(name, fileList, files=-1, outCanvas=[], names=[], debug=False, drawOption="SAME L P E PLC PMC",
